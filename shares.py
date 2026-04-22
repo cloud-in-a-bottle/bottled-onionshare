@@ -92,6 +92,12 @@ class ShareManager:
         self._shares: dict[str, Share] = {}
         self._procs: dict[str, subprocess.Popen] = {}
         self._reader_threads: dict[str, threading.Thread] = {}
+        # IDs of shares currently receiving an upload. We refuse to
+        # ``start`` a share while one of its uploads is still streaming
+        # to disk, to eliminate the race where the status check in
+        # ``add_file_stream`` passes but the share starts before the
+        # write completes.
+        self._uploading: set[str] = set()
         os.makedirs(SHARES_ROOT, exist_ok=True)
         os.makedirs(RECEIVE_ROOT, exist_ok=True)
         os.makedirs(PERSIST_ROOT, exist_ok=True)
@@ -114,6 +120,9 @@ class ShareManager:
             print(f"[shares] WARN: failed to load {STATE_FILE}: {e}", flush=True)
             return
         for sid, data in raw.get("shares", {}).items():
+            if not isinstance(data, dict):
+                print(f"[shares] WARN: skipping non-dict entry {sid!r}", flush=True)
+                continue
             # Every share comes back up as stopped -- we don't inherit
             # subprocesses from the previous process.
             data["status"] = "stopped"
@@ -124,7 +133,13 @@ class ShareManager:
             data["error"] = None
             # Filter to only known fields in case schema changed.
             known = {k: v for k, v in data.items() if k in Share.__annotations__}
-            self._shares[sid] = Share(**known)
+            try:
+                self._shares[sid] = Share(**known)
+            except TypeError as e:
+                print(
+                    f"[shares] WARN: skipping malformed share {sid!r}: {e}",
+                    flush=True,
+                )
 
     def _save_state_locked(self) -> None:
         # Caller must hold self._lock.
@@ -216,22 +231,36 @@ class ShareManager:
         are copied to ``<data_dir>/<safe_filename>`` in chunks, so we
         never buffer the whole upload in memory.
         """
-        share = self.get(share_id)
-        if not share:
-            raise KeyError(share_id)
-        if share.mode not in ("share", "website"):
-            raise ValueError("only share/website modes accept files")
-        if share.status in ("running", "starting"):
-            raise RuntimeError("stop the share before modifying its files")
         safe = _safe_filename(filename)
         if not safe:
             raise ValueError("invalid filename")
-        path = os.path.join(share.data_dir, safe)
-        # Write to a tmp file first and rename, so a partial upload
-        # doesn't leave a half-written file that would later be served
-        # to recipients as though it were complete.
+
+        # Validate + reserve under the lock. The lock guards against a
+        # concurrent ``start()`` racing with us: while our id is in
+        # ``_uploading``, ``start()`` will refuse to launch, and while
+        # the share is running/starting, we refuse to upload. The file
+        # write itself happens *outside* the lock (uploads can be
+        # multi-GiB), but correctness is preserved because neither
+        # state transition can happen until we remove ourselves from
+        # ``_uploading`` below.
+        with self._lock:
+            share = self._shares.get(share_id)
+            if not share:
+                raise KeyError(share_id)
+            if share.mode not in ("share", "website"):
+                raise ValueError("only share/website modes accept files")
+            if share.status in ("running", "starting"):
+                raise RuntimeError("stop the share before modifying its files")
+            self._uploading.add(share_id)
+            data_dir = share.data_dir
+
+        path = os.path.join(data_dir, safe)
         tmp = path + ".part"
         try:
+            # Write to a tmp file first and atomically rename, so a
+            # partial upload doesn't leave a half-written file that
+            # would later be served to recipients as though it were
+            # complete.
             with open(tmp, "wb") as out:
                 while True:
                     chunk = source.read(self._COPY_CHUNK)
@@ -239,18 +268,21 @@ class ShareManager:
                         break
                     out.write(chunk)
             os.replace(tmp, path)
+            with self._lock:
+                share = self._shares.get(share_id)
+                if share is not None and safe not in share.files:
+                    share.files.append(safe)
+                    self._save_state_locked()
         except BaseException:
-            # Clean up partials on any error (including KeyboardInterrupt).
             if os.path.exists(tmp):
                 try:
                     os.remove(tmp)
                 except OSError:
                     pass
             raise
-        with self._lock:
-            if safe not in share.files:
-                share.files.append(safe)
-            self._save_state_locked()
+        finally:
+            with self._lock:
+                self._uploading.discard(share_id)
 
     def remove_file(self, share_id: str, filename: str) -> None:
         share = self.get(share_id)
@@ -291,6 +323,10 @@ class ShareManager:
             if share_id in self._procs:
                 # Already running or start in progress.
                 return
+            if share_id in self._uploading:
+                raise RuntimeError(
+                    "upload in progress; wait for it to finish before starting"
+                )
             if share.mode in ("share", "website") and not share.files:
                 raise RuntimeError("add at least one file before starting")
 
@@ -445,11 +481,21 @@ class ShareManager:
 
         # stdout closed => process is (or is about to be) done.
         rc = proc.wait()
+        # We call stop() with SIGTERM first and escalate to SIGKILL if
+        # the process doesn't exit quickly; either case is a legitimate
+        # user-initiated shutdown, not an error.
+        clean_exit_codes = {
+            0,
+            -signal.SIGTERM,
+            128 + signal.SIGTERM,
+            -signal.SIGKILL,
+            128 + signal.SIGKILL,
+        }
         with self._lock:
             share = self._shares.get(share_id)
             if share is not None:
                 share.pid = None
-                if rc == 0 or rc == -signal.SIGTERM or rc == 128 + signal.SIGTERM:
+                if rc in clean_exit_codes:
                     share.status = "stopped"
                     share.error = None
                 else:

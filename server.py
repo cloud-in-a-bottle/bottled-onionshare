@@ -47,8 +47,16 @@ def _read_template(name: str) -> str:
 
 
 def _render(title: str, content: str, flash: str = "") -> str:
-    base = _read_template("base.html")
-    return base.format(title=html.escape(title), content=content, flash=flash)
+    # We deliberately use str.replace() rather than str.format(): log
+    # output and user-supplied filenames that end up in ``content`` may
+    # contain literal ``{`` / ``}`` characters, which str.format would
+    # attempt (and fail) to treat as placeholders.
+    return (
+        _read_template("base.html")
+        .replace("{title}", html.escape(title))
+        .replace("{flash}", flash)
+        .replace("{content}", content)
+    )
 
 
 def _flash_html(message: str, kind: str = "success") -> str:
@@ -292,9 +300,8 @@ class AdminHandler(http.server.BaseHTTPRequestHandler):
         else:
             received_section = ""
 
-        log_html = "<pre class=\"log\">{}</pre>".format(
-            html.escape("\n".join(share.log_tail) or "(no output yet)")
-        )
+        log_text = "\n".join(share.log_tail) or "(no output yet)"
+        log_html = f'<pre class="log">{html.escape(log_text)}</pre>'
 
         error_html = (
             f'<div class="flash flash-error">{html.escape(share.error)}</div>'
@@ -511,8 +518,8 @@ def _render_received_list(share: shares.Share) -> str:
     if not os.path.isdir(share.data_dir):
         return '<p class="muted">No files received yet.</p>'
     entries: list[str] = []
-    # We only list top-level filenames; onionshare writes into
-    # subdirectories per upload session.
+    # onionshare writes each upload into its own subdirectory, so we
+    # walk the full tree and show relative paths.
     for root, _dirs, files in os.walk(share.data_dir):
         for f in files:
             rel = os.path.relpath(os.path.join(root, f), share.data_dir)
