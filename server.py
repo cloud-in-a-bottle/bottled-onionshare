@@ -257,7 +257,9 @@ class AdminHandler(http.server.BaseHTTPRequestHandler):
         self._respond_html(200, _render("New share", tpl, flash=flash))
 
     def _share_detail(self, share_id: str, flash: str = "") -> None:
-        share = manager.get(share_id)
+        # Use a snapshot rather than the live Share because the reader
+        # thread may append to log_tail / flip status while we render.
+        share = manager.snapshot(share_id)
         if share is None:
             self._not_found()
             return
@@ -480,8 +482,16 @@ class AdminHandler(http.server.BaseHTTPRequestHandler):
             ".svg": "image/svg+xml",
             ".png": "image/png",
         }.get(ext, "application/octet-stream")
-        with open(filepath, "rb") as f:
-            data = f.read()
+        try:
+            with open(filepath, "rb") as f:
+                data = f.read()
+        except OSError as e:
+            print(f"[admin] static read failed for {filename!r}: {e}", flush=True)
+            self.send_response(500)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(b"500 internal server error")
+            return
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))

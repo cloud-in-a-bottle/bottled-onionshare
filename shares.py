@@ -166,18 +166,46 @@ class ShareManager:
     # ------------------------------------------------------------------ CRUD
 
     def list_shares(self) -> list[Share]:
+        import copy
+
         with self._lock:
             self._poll_once_locked()
-            return sorted(
-                self._shares.values(),
-                key=lambda s: s.created_at,
-                reverse=True,
-            )
+            snaps = []
+            for live in self._shares.values():
+                snap = copy.copy(live)
+                snap.log_tail = list(live.log_tail)
+                snap.files = list(live.files)
+                snaps.append(snap)
+            snaps.sort(key=lambda s: s.created_at, reverse=True)
+            return snaps
 
     def get(self, share_id: str) -> Optional[Share]:
         with self._lock:
             self._poll_once_locked()
             return self._shares.get(share_id)
+
+    def snapshot(self, share_id: str) -> Optional[Share]:
+        """Return a deep-enough copy of a share for safe rendering.
+
+        The manager mutates the live ``Share`` object from the reader
+        thread (appending to ``log_tail``, updating ``status``, etc).
+        Render-side code that iterates over ``log_tail`` needs a stable
+        snapshot to avoid 'list changed size during iteration' or
+        half-updated status strings. We dataclasses.replace() the share
+        under the lock, explicitly copying mutable fields.
+        """
+        import copy
+
+        with self._lock:
+            self._poll_once_locked()
+            live = self._shares.get(share_id)
+            if live is None:
+                return None
+            # shallow copy of the Share + copies of mutable list fields
+            snap = copy.copy(live)
+            snap.log_tail = list(live.log_tail)
+            snap.files = list(live.files)
+            return snap
 
     def create(
         self,
@@ -285,19 +313,34 @@ class ShareManager:
                 self._uploading.discard(share_id)
 
     def remove_file(self, share_id: str, filename: str) -> None:
-        share = self.get(share_id)
-        if not share:
-            raise KeyError(share_id)
-        if share.status in ("running", "starting"):
-            raise RuntimeError("stop the share before modifying its files")
         safe = _safe_filename(filename)
-        path = os.path.join(share.data_dir, safe)
-        if os.path.isfile(path):
-            os.remove(path)
+        if not safe:
+            raise ValueError("invalid filename")
+
+        # Same pattern as add_file_stream: reserve under the lock so
+        # start() can't race us, then do the filesystem work outside
+        # the lock, then update share.files under the lock.
         with self._lock:
-            if safe in share.files:
-                share.files.remove(safe)
-            self._save_state_locked()
+            share = self._shares.get(share_id)
+            if not share:
+                raise KeyError(share_id)
+            if share.status in ("running", "starting"):
+                raise RuntimeError("stop the share before modifying its files")
+            self._uploading.add(share_id)
+            data_dir = share.data_dir
+
+        try:
+            path = os.path.join(data_dir, safe)
+            if os.path.isfile(path):
+                os.remove(path)
+            with self._lock:
+                share = self._shares.get(share_id)
+                if share is not None and safe in share.files:
+                    share.files.remove(safe)
+                    self._save_state_locked()
+        finally:
+            with self._lock:
+                self._uploading.discard(share_id)
 
     def delete(self, share_id: str) -> None:
         self.stop(share_id)
