@@ -1,0 +1,30 @@
+<h1>New share</h1>
+<form method="POST" action="/shares/new" class="form-stack">
+  <label>
+    <span>Title</span>
+    <input name="title" placeholder="optional, shown in the recipient's browser tab">
+  </label>
+
+  <fieldset>
+    <legend>Mode</legend>
+    <label class="radio"><input type="radio" name="mode" value="share" checked> <strong>Share files</strong> — recipients download files you upload.</label>
+    <label class="radio"><input type="radio" name="mode" value="receive"> <strong>Receive files</strong> — recipients upload files to you.</label>
+    <label class="radio"><input type="radio" name="mode" value="website"> <strong>Website</strong> — serve a static site from uploaded files.</label>
+    <label class="radio"><input type="radio" name="mode" value="chat"> <strong>Chat</strong> — ephemeral anonymous chat room.</label>
+  </fieldset>
+
+  <label class="checkbox">
+    <input type="checkbox" name="public">
+    <span><strong>Public</strong> — skip the per-share private key. Anyone with the URL can access.</span>
+  </label>
+
+  <label class="checkbox">
+    <input type="checkbox" name="persistent">
+    <span><strong>Persistent</strong> — keep the same <code>.onion</code> URL across restarts. Stores a session key in your app data.</span>
+  </label>
+
+  <div class="actions">
+    <button type="submit" class="btn btn-primary">Create</button>
+    <a href="/" class="btn">Cancel</a>
+  </div>
+</form>

@@ -1,0 +1,33 @@
+<div class="share-header">
+  <h1>{title}</h1>
+  <p class="meta">
+    <span>Mode: <strong>{mode}</strong></span>
+    <span>Public: <strong>{public}</strong></span>
+    <span>Persistent: <strong>{persistent}</strong></span>
+    <span>Status: {status}</span>
+  </p>
+</div>
+
+{error}
+
+<section class="onion-box">
+  <label>Onion URL:</label>
+  <div>{onion}</div>
+  {private_key}
+</section>
+
+<section class="controls">
+  {start_stop_button}
+  <form method="POST" action="/shares/{share_id}/delete" class="inline" onsubmit="return confirm('Delete this share and all its files?');">
+    <button class="btn btn-danger">Delete share</button>
+  </form>
+</section>
+
+{files_section}
+
+{received_section}
+
+<section>
+  <h3>Log</h3>
+  {log}
+</section>

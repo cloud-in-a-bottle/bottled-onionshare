@@ -1,0 +1,9 @@
+<section>
+  <h3>Files</h3>
+  {file_list}
+  <form method="POST" action="/shares/{share_id}/upload" enctype="multipart/form-data" class="upload-form">
+    <input type="file" name="file" multiple required>
+    <button type="submit" class="btn">Upload</button>
+  </form>
+  <p class="muted"><small>Stop the share before adding or removing files.</small></p>
+</section>
