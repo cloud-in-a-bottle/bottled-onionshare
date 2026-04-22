@@ -33,6 +33,7 @@ import re
 import shutil
 import signal
 import subprocess
+import tempfile
 import threading
 import time
 import uuid
@@ -92,12 +93,14 @@ class ShareManager:
         self._shares: dict[str, Share] = {}
         self._procs: dict[str, subprocess.Popen] = {}
         self._reader_threads: dict[str, threading.Thread] = {}
-        # IDs of shares currently receiving an upload. We refuse to
+        # Count of in-flight uploads per share id. We refuse to
         # ``start`` a share while one of its uploads is still streaming
         # to disk, to eliminate the race where the status check in
         # ``add_file_stream`` passes but the share starts before the
-        # write completes.
-        self._uploading: set[str] = set()
+        # write completes. Multiple concurrent uploads to the same
+        # share are fine (different filenames) -- hence a counter
+        # rather than a plain set.
+        self._uploading: dict[str, int] = {}
         os.makedirs(SHARES_ROOT, exist_ok=True)
         os.makedirs(RECEIVE_ROOT, exist_ok=True)
         os.makedirs(PERSIST_ROOT, exist_ok=True)
@@ -279,17 +282,25 @@ class ShareManager:
                 raise ValueError("only share/website modes accept files")
             if share.status in ("running", "starting"):
                 raise RuntimeError("stop the share before modifying its files")
-            self._uploading.add(share_id)
+            self._uploading[share_id] = self._uploading.get(share_id, 0) + 1
             data_dir = share.data_dir
 
         path = os.path.join(data_dir, safe)
-        tmp = path + ".part"
+        # Use a unique temp name (not just "<path>.part") so concurrent
+        # uploads of the same filename don't clobber each other's temp
+        # files. The final rename is still atomic -- whichever upload
+        # finishes last wins, which is the same semantics as
+        # overwriting a regular file.
+        tmp_fd, tmp = tempfile.mkstemp(
+            prefix=f".{safe}.", suffix=".part", dir=data_dir
+        )
         try:
             # Write to a tmp file first and atomically rename, so a
             # partial upload doesn't leave a half-written file that
             # would later be served to recipients as though it were
             # complete.
-            with open(tmp, "wb") as out:
+            with os.fdopen(tmp_fd, "wb") as out:
+                tmp_fd = -1  # fdopen takes ownership of the fd
                 while True:
                     chunk = source.read(self._COPY_CHUNK)
                     if not chunk:
@@ -302,6 +313,11 @@ class ShareManager:
                     share.files.append(safe)
                     self._save_state_locked()
         except BaseException:
+            if tmp_fd >= 0:
+                try:
+                    os.close(tmp_fd)
+                except OSError:
+                    pass
             if os.path.exists(tmp):
                 try:
                     os.remove(tmp)
@@ -310,7 +326,15 @@ class ShareManager:
             raise
         finally:
             with self._lock:
-                self._uploading.discard(share_id)
+                self._release_upload_slot(share_id)
+
+    def _release_upload_slot(self, share_id: str) -> None:
+        """Decrement the uploading counter; caller holds ``self._lock``."""
+        n = self._uploading.get(share_id, 0) - 1
+        if n <= 0:
+            self._uploading.pop(share_id, None)
+        else:
+            self._uploading[share_id] = n
 
     def remove_file(self, share_id: str, filename: str) -> None:
         safe = _safe_filename(filename)
@@ -326,7 +350,7 @@ class ShareManager:
                 raise KeyError(share_id)
             if share.status in ("running", "starting"):
                 raise RuntimeError("stop the share before modifying its files")
-            self._uploading.add(share_id)
+            self._uploading[share_id] = self._uploading.get(share_id, 0) + 1
             data_dir = share.data_dir
 
         try:
@@ -340,7 +364,7 @@ class ShareManager:
                     self._save_state_locked()
         finally:
             with self._lock:
-                self._uploading.discard(share_id)
+                self._release_upload_slot(share_id)
 
     def delete(self, share_id: str) -> None:
         self.stop(share_id)

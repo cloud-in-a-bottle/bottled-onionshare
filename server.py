@@ -334,7 +334,9 @@ class AdminHandler(http.server.BaseHTTPRequestHandler):
         self._respond_html(200, _render(share.title, content, flash=flash))
 
     def _share_files_json(self, share_id: str) -> None:
-        share = manager.get(share_id)
+        # Snapshot so we don't serialize a live list that the reader
+        # thread or another request handler might mutate under us.
+        share = manager.snapshot(share_id)
         if share is None:
             self._respond_json(404, {"error": "not found"})
             return
