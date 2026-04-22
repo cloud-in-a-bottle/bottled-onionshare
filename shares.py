@@ -36,7 +36,7 @@ import subprocess
 import threading
 import time
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from typing import Optional
 
 APP_DATA = os.environ.get("OPENHOST_APP_DATA_DIR", "/data/app_data/onionshare")
@@ -79,13 +79,6 @@ class Share:
     log_tail: list[str] = field(default_factory=list)
     created_at: float = 0.0
     last_started_at: Optional[float] = None
-
-    def to_public_dict(self) -> dict:
-        d = asdict(self)
-        # Never serialize the private key in list responses -- it's only
-        # revealed on the detail page. Callers that need it ask for it
-        # explicitly.
-        return d
 
 
 class ShareManager:
@@ -202,21 +195,58 @@ class ShareManager:
             self._save_state_locked()
         return share
 
+    # Copy buffer size for streaming uploads. Small enough to keep
+    # memory use bounded; large enough to be efficient.
+    _COPY_CHUNK = 256 * 1024
+
     def add_file(self, share_id: str, filename: str, content: bytes) -> None:
-        """Drop an uploaded file into a share's staging directory."""
+        """Drop an in-memory blob into a share's staging directory.
+
+        For large uploads prefer :meth:`add_file_stream` which does not
+        buffer the whole payload in memory.
+        """
+        import io as _io
+
+        self.add_file_stream(share_id, filename, _io.BytesIO(content))
+
+    def add_file_stream(self, share_id: str, filename: str, source) -> None:
+        """Stream an uploaded file into a share's staging directory.
+
+        ``source`` is any readable binary file-like object. The contents
+        are copied to ``<data_dir>/<safe_filename>`` in chunks, so we
+        never buffer the whole upload in memory.
+        """
         share = self.get(share_id)
         if not share:
             raise KeyError(share_id)
         if share.mode not in ("share", "website"):
             raise ValueError("only share/website modes accept files")
-        if share.status == "running":
+        if share.status in ("running", "starting"):
             raise RuntimeError("stop the share before modifying its files")
         safe = _safe_filename(filename)
         if not safe:
             raise ValueError("invalid filename")
         path = os.path.join(share.data_dir, safe)
-        with open(path, "wb") as f:
-            f.write(content)
+        # Write to a tmp file first and rename, so a partial upload
+        # doesn't leave a half-written file that would later be served
+        # to recipients as though it were complete.
+        tmp = path + ".part"
+        try:
+            with open(tmp, "wb") as out:
+                while True:
+                    chunk = source.read(self._COPY_CHUNK)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+            os.replace(tmp, path)
+        except BaseException:
+            # Clean up partials on any error (including KeyboardInterrupt).
+            if os.path.exists(tmp):
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+            raise
         with self._lock:
             if safe not in share.files:
                 share.files.append(safe)
@@ -226,7 +256,7 @@ class ShareManager:
         share = self.get(share_id)
         if not share:
             raise KeyError(share_id)
-        if share.status == "running":
+        if share.status in ("running", "starting"):
             raise RuntimeError("stop the share before modifying its files")
         safe = _safe_filename(filename)
         path = os.path.join(share.data_dir, safe)
@@ -432,15 +462,35 @@ class ShareManager:
             self._reader_threads.pop(share_id, None)
 
     def _poll_once_locked(self) -> None:
-        """Cheap check to drop references to exited subprocesses.
+        """Defensive cleanup for exited subprocesses.
 
-        The reader thread is the one that actually updates status; this
-        just catches cases where the reader hasn't been scheduled yet.
+        Normally the reader thread updates status and drops the proc
+        from ``_procs`` when the child's stdout closes. If the reader
+        thread has died or is otherwise wedged, this catches that: for
+        any proc whose ``poll()`` has returned but the corresponding
+        reader thread is no longer alive, we forcibly mark the share
+        stopped and drop references.
         """
         for sid, proc in list(self._procs.items()):
-            if proc.poll() is not None:
-                # Reader will take over soon; nothing else to do here.
-                pass
+            if proc.poll() is None:
+                continue
+            reader = self._reader_threads.get(sid)
+            if reader is not None and reader.is_alive():
+                # Reader is still draining stdout; let it finish.
+                continue
+            # Reader is gone (or never registered) and proc exited.
+            # Clean up to avoid leaking the reference forever.
+            share = self._shares.get(sid)
+            if share is not None and share.status not in ("stopped", "error"):
+                rc = proc.returncode
+                share.status = "stopped" if (rc == 0 or rc is None) else "error"
+                if share.status == "error" and not share.error:
+                    share.error = f"onionshare-cli exited with code {rc}"
+                share.pid = None
+                share.onion_url = None
+                share.private_key = None
+            self._procs.pop(sid, None)
+            self._reader_threads.pop(sid, None)
 
     def _reaper_loop(self) -> None:
         while True:
@@ -450,19 +500,24 @@ class ShareManager:
 
 
 def _safe_filename(name: str) -> str:
-    """Collapse a user-supplied filename down to a leaf basename.
+    """Reduce a user-supplied filename to a safe leaf basename.
 
-    We refuse anything that tries to escape the staging directory and
-    strip out path separators and NUL bytes. We keep spaces and unicode.
+    We keep spaces, unicode, and leading-dot filenames (``.env``,
+    ``.gitignore``) but strip directory components and refuse anything
+    that would be or resolve to the traversal tokens ``.`` / ``..`` or
+    contains NUL bytes. The returned string is always a plain filename
+    with no path separators, so joining it onto ``data_dir`` cannot
+    escape that directory.
     """
-    # Strip directory components entirely.
+    if not name:
+        return ""
+    # Normalise Windows-style separators and strip directory components.
     base = os.path.basename(name.replace("\\", "/"))
-    base = base.lstrip(".")  # refuse hidden / traversal leaders
     if base in ("", ".", ".."):
         return ""
-    if "\x00" in base:
+    if "\x00" in base or "/" in base:
         return ""
-    # Cap length defensively.
+    # Cap length defensively (most filesystems allow 255 bytes).
     if len(base) > 255:
         base = base[:255]
     return base

@@ -29,6 +29,11 @@ ADMIN_PORT = 8080
 TEMPLATES_DIR = "/app/templates"
 STATIC_DIR = "/app/static"
 
+
+class _BadRequest(Exception):
+    """Raised by request helpers to short-circuit with HTTP 400."""
+
+
 # One shared manager instance.
 manager = shares.ShareManager()
 
@@ -106,6 +111,18 @@ class AdminHandler(http.server.BaseHTTPRequestHandler):
     # --- dispatch ---
 
     def do_GET(self) -> None:  # noqa: N802 (stdlib API)
+        try:
+            self._do_get()
+        except _BadRequest as e:
+            self._respond_html(400, _render("Bad request", f"<h2>{html.escape(str(e))}</h2>"))
+
+    def do_POST(self) -> None:  # noqa: N802
+        try:
+            self._do_post()
+        except _BadRequest as e:
+            self._respond_html(400, _render("Bad request", f"<h2>{html.escape(str(e))}</h2>"))
+
+    def _do_get(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path.rstrip("/") or "/"
 
@@ -128,7 +145,7 @@ class AdminHandler(http.server.BaseHTTPRequestHandler):
         else:
             self._not_found()
 
-    def do_POST(self) -> None:  # noqa: N802
+    def _do_post(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path.rstrip("/") or "/"
 
@@ -160,8 +177,26 @@ class AdminHandler(http.server.BaseHTTPRequestHandler):
 
     # --- helpers ---
 
+    # Cap request bodies to something reasonable for forms (1 MiB). File
+    # uploads use a different path with a higher cap; see
+    # ``_upload_file``.
+    _MAX_FORM_BODY = 1 * 1024 * 1024
+    _MAX_UPLOAD_BODY = 2 * 1024 * 1024 * 1024  # 2 GiB per upload request
+
+    def _parse_content_length(self, maximum: int) -> int:
+        raw = self.headers.get("Content-Length", "0")
+        try:
+            length = int(raw)
+        except (TypeError, ValueError):
+            raise _BadRequest("invalid Content-Length")
+        if length < 0:
+            raise _BadRequest("negative Content-Length")
+        if length > maximum:
+            raise _BadRequest(f"request body too large (max {maximum} bytes)")
+        return length
+
     def _read_body(self) -> bytes:
-        length = int(self.headers.get("Content-Length", 0))
+        length = self._parse_content_length(self._MAX_FORM_BODY)
         return self.rfile.read(length)
 
     def _form_params(self) -> dict[str, list[str]]:
@@ -331,10 +366,19 @@ class AdminHandler(http.server.BaseHTTPRequestHandler):
                 flash=_flash_html("Expected multipart upload.", "error"),
             )
             return
-        length = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(length)
+        try:
+            length = self._parse_content_length(self._MAX_UPLOAD_BODY)
+        except _BadRequest as e:
+            self._respond_html(413, _render("Upload too large", f"<h2>{html.escape(str(e))}</h2>"))
+            return
+
+        # Let FieldStorage stream directly from the request body. For
+        # fields larger than cgi's in-memory threshold it will spool to
+        # a temp file on disk, which is what we want for multi-GiB
+        # uploads -- buffering the full body in memory would OOM the
+        # container.
         fs = cgi.FieldStorage(
-            fp=io.BytesIO(body),
+            fp=self.rfile,
             environ={
                 "REQUEST_METHOD": "POST",
                 "CONTENT_TYPE": content_type,
@@ -354,9 +398,12 @@ class AdminHandler(http.server.BaseHTTPRequestHandler):
             for item in items:
                 if not getattr(item, "filename", None):
                     continue
-                data = item.file.read()
                 try:
-                    manager.add_file(share_id, item.filename, data)
+                    # ``item.file`` is the streaming (possibly spooled)
+                    # file-like object. ``add_file_stream`` copies it
+                    # chunk-by-chunk so we never pull the whole upload
+                    # into memory.
+                    manager.add_file_stream(share_id, item.filename, item.file)
                     added += 1
                 except (ValueError, RuntimeError, KeyError) as e:
                     errors.append(f"{item.filename}: {e}")
@@ -454,7 +501,7 @@ def _render_file_list(share: shares.Share) -> str:
             f'class="inline" onsubmit="return confirm(\'Remove this file?\');">'
             f'<input type="hidden" name="filename" value="{html.escape(fname)}">'
             f'<button class="btn btn-sm btn-danger" '
-            f'{"disabled" if share.status == "running" else ""}>Remove</button>'
+            f'{"disabled" if share.status in ("running", "starting") else ""}>Remove</button>'
             "</form></li>"
         )
     return '<ul class="filelist">' + "".join(items) + "</ul>"
