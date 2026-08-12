@@ -1,11 +1,11 @@
-# openhost-onionshare
+# bottled-onionshare
 
-[OnionShare](https://onionshare.org/) packaged as an OpenHost app.
+[OnionShare](https://onionshare.org/) packaged as a Cloud in a Bottle app.
 
 Share files, receive files, host a static website, or run a chat room
 over Tor hidden services — all managed from a tiny admin UI gated by
-your OpenHost login. Recipients connect via a `.onion` URL using Tor
-Browser; that traffic never touches the OpenHost router.
+your Cloud in a Bottle login. Recipients connect via a `.onion` URL using Tor
+Browser; that traffic never touches the Cloud in a Bottle router.
 
 ## What you get
 
@@ -26,8 +26,8 @@ be marked **persistent**, which writes a session file so the same
 The container runs two things:
 
 1. `server.py` — a small stdlib HTTP server on port 8080 that serves
-   the admin UI. Bound to 127.0.0.1 on the host by OpenHost; all
-   requests go through the OpenHost router which enforces the owner's
+   the admin UI. Bound to 127.0.0.1 on the host by Cloud in a Bottle; all
+   requests go through the Cloud in a Bottle router which enforces the owner's
    login before proxying here.
 2. One `onionshare-cli` subprocess per running share. Each of those
    spawns its own `tor` process, creates an ephemeral or persistent
@@ -53,7 +53,7 @@ container bridge.
 
 ## Usage
 
-Open the app on your OpenHost instance, click **New share**, pick a
+Open the app on your Cloud in a Bottle instance, click **New share**, pick a
 mode, upload files if applicable, then **Start**. Copy the `.onion`
 URL (and private key, if not public) to your recipient over a
 side-channel they trust — Signal, email, etc. They open it in Tor
@@ -66,12 +66,12 @@ files and any persistent session key.
 
 - The `.onion` address and private key for a live share are visible to
   anyone with access to the admin UI. The admin UI is behind your
-  OpenHost login.
+  Cloud in a Bottle login.
 - Persistent shares store their Tor keys in `persistent_sessions/`.
   Treat that directory like you'd treat any secret.
 - Receive mode accepts arbitrary uploads. Don't open received files
   from untrusted sources without the usual precautions.
-- The admin server talks plain HTTP to localhost; OpenHost's reverse
+- The admin server talks plain HTTP to localhost; Cloud in a Bottle's reverse
   proxy provides TLS to the outside world.
 
 ## Licensing
