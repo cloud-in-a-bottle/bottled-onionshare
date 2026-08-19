@@ -235,16 +235,24 @@ class AdminHandler(http.server.BaseHTTPRequestHandler):
         # is already gated by the OpenHost router, but these prevent
         # clickjacking (framing this panel, whose forms start/stop/delete
         # shares in one click) and MIME sniffing, and keep the .onion
-        # URLs / private keys out of the Referer header. CSP is limited to
-        # frame-ancestors so the templates' inline confirm() handlers keep
-        # working. The app is only ever served over HTTPS (the OpenHost
-        # router terminates TLS), so pin the browser to HTTPS with HSTS.
-        # No includeSubDomains: this app owns only its own subdomain and
-        # shouldn't assert an HTTPS policy over any child names.
+        # URLs / private keys out of the Referer header on cross-origin
+        # requests. CSP is limited to frame-ancestors so the templates'
+        # inline confirm() handlers keep working. The app is only ever
+        # served over HTTPS (the OpenHost router terminates TLS), so pin
+        # the browser to HTTPS with HSTS. No includeSubDomains: this app
+        # owns only its own subdomain and shouldn't assert an HTTPS policy
+        # over any child names.
+        #
+        # Referrer-Policy is "same-origin": it withholds the Referer from
+        # cross-origin requests but still sends a correct same-origin Origin
+        # header on POSTs. That Origin matters because the OpenHost router
+        # rejects an owner-authenticated POST whose Origin doesn't match the
+        # app host, and a "no-referrer" policy makes Chromium send
+        # "Origin: null" on POST navigations, which the router would reject.
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Content-Security-Policy", "frame-ancestors 'none'")
         self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Referrer-Policy", "same-origin")
         self.send_header("Strict-Transport-Security", "max-age=31536000")
 
     def _respond_html(self, code: int, body: str) -> None:
