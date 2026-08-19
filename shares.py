@@ -291,10 +291,17 @@ class ShareManager:
         # files. The final rename is still atomic -- whichever upload
         # finishes last wins, which is the same semantics as
         # overwriting a regular file.
-        tmp_fd, tmp = tempfile.mkstemp(
-            prefix=f".{safe}.", suffix=".part", dir=data_dir
-        )
+        tmp: str | None = None
+        tmp_fd = -1
         try:
+            # mkstemp is inside the try so that if it raises -- e.g. the
+            # temp name (".<safe>.<rand>.part") would exceed the
+            # filesystem's NAME_MAX -- the ``finally`` still releases the
+            # upload slot. Otherwise a single failed upload would wedge
+            # the share: start() refuses to launch while a slot is held.
+            tmp_fd, tmp = tempfile.mkstemp(
+                prefix=f".{safe}.", suffix=".part", dir=data_dir
+            )
             # Write to a tmp file first and atomically rename, so a
             # partial upload doesn't leave a half-written file that
             # would later be served to recipients as though it were
@@ -318,7 +325,7 @@ class ShareManager:
                     os.close(tmp_fd)
                 except OSError:
                     pass
-            if os.path.exists(tmp):
+            if tmp is not None and os.path.exists(tmp):
                 try:
                     os.remove(tmp)
                 except OSError:
@@ -630,7 +637,12 @@ def _safe_filename(name: str) -> str:
         return ""
     if "\x00" in base or "/" in base:
         return ""
-    # Cap length defensively (most filesystems allow 255 bytes).
-    if len(base) > 255:
-        base = base[:255]
+    # Cap length so that both the final filename AND the temporary upload
+    # name (".<safe>.<rand>.part" adds ~15 bytes of affixes) stay within
+    # the filesystem's NAME_MAX (255 bytes on ext4). Budget by bytes, not
+    # characters, and don't split a multibyte UTF-8 sequence.
+    max_name_bytes = 200
+    encoded = base.encode("utf-8")
+    if len(encoded) > max_name_bytes:
+        base = encoded[:max_name_bytes].decode("utf-8", errors="ignore")
     return base
