@@ -48,12 +48,12 @@ def _read_template(name: str) -> str:
 
 
 def _fill(template: str, values: dict[str, str]) -> str:
-    """Substitute ``{key}`` placeholders in a single pass.
+    """Substitute ``{key}`` placeholders in a single regex pass.
 
-    Unlike a chain of ``str.replace`` calls, one regex pass never
-    re-scans an already-substituted value, so user-supplied data (share
-    titles, filenames, log output) that happens to contain literal
-    ``{token}`` sequences can never be expanded into another
+    Each placeholder is replaced exactly once and substituted values are
+    never re-scanned, so user-supplied data (share titles, filenames, log
+    output) that happens to contain literal ``{token}`` sequences is
+    inserted verbatim and can never be expanded into another
     placeholder's content. Unknown ``{placeholders}`` are left as-is.
     """
     return re.sub(
@@ -507,11 +507,13 @@ class AdminHandler(http.server.BaseHTTPRequestHandler):
         # Strip any attempt at traversal.
         if "/" in filename or ".." in filename or filename.startswith("."):
             self.send_response(404)
+            self._send_security_headers()
             self.end_headers()
             return
         filepath = os.path.join(STATIC_DIR, filename)
         if not os.path.isfile(filepath):
             self.send_response(404)
+            self._send_security_headers()
             self.end_headers()
             return
         ext = os.path.splitext(filename)[1]
@@ -528,6 +530,7 @@ class AdminHandler(http.server.BaseHTTPRequestHandler):
             print(f"[admin] static read failed for {filename!r}: {e}", flush=True)
             self.send_response(500)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self._send_security_headers()
             self.end_headers()
             self.wfile.write(b"500 internal server error")
             return
