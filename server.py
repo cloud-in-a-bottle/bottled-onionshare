@@ -237,11 +237,15 @@ class AdminHandler(http.server.BaseHTTPRequestHandler):
         # shares in one click) and MIME sniffing, and keep the .onion
         # URLs / private keys out of the Referer header. CSP is limited to
         # frame-ancestors so the templates' inline confirm() handlers keep
-        # working.
+        # working. The app is only ever served over HTTPS (the OpenHost
+        # router terminates TLS), so pin the browser to HTTPS with HSTS.
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Content-Security-Policy", "frame-ancestors 'none'")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header(
+            "Strict-Transport-Security", "max-age=31536000; includeSubDomains"
+        )
 
     def _respond_html(self, code: int, body: str) -> None:
         encoded = body.encode("utf-8")
