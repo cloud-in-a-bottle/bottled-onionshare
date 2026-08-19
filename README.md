@@ -1,80 +1,57 @@
 # bottled-onionshare
 
 [OnionShare](https://onionshare.org/) packaged as a Cloud in a Bottle app.
-
-Share files, receive files, host a static website, or run a chat room
-over Tor hidden services — all managed from a tiny admin UI gated by
-your Cloud in a Bottle login. Recipients connect via a `.onion` URL using Tor
-Browser; that traffic never touches the Cloud in a Bottle router.
+Share files, receive files, host a static website, or run a chat room over
+Tor hidden services, all managed from a small admin panel gated by your
+Cloud in a Bottle login.
 
 ## What you get
 
-- **Share files** — generate a `.onion` that lets recipients download
-  files you've uploaded.
-- **Receive files** — anonymous dropbox. Incoming uploads land under
-  `/data/app_data/onionshare/received/<share_id>/`.
-- **Website** — serve a static folder as a `.onion` site.
-- **Chat** — ephemeral chat room, nothing persisted.
+- Share files: generate a `.onion` address where recipients download files
+  you upload.
+- Receive files: an anonymous dropbox; incoming uploads are saved to your
+  app data.
+- Website: serve a folder of uploaded files as a `.onion` website.
+- Chat: an ephemeral chat room that keeps nothing.
 
-Each share can be **public** (URL-only access) or default (URL + a
-per-share private key the recipient must enter). Each share can also
-be marked **persistent**, which writes a session file so the same
-`.onion` address comes back the next time the share is started.
-
-## Architecture
-
-The container runs two things:
-
-1. `server.py` — a small stdlib HTTP server on port 8080 that serves
-   the admin UI. Bound to 127.0.0.1 on the host by Cloud in a Bottle; all
-   requests go through the Cloud in a Bottle router which enforces the owner's
-   login before proxying here.
-2. One `onionshare-cli` subprocess per running share. Each of those
-   spawns its own `tor` process, creates an ephemeral or persistent
-   hidden service, and serves the share's content directly over Tor.
-   We scrape stdout to pull the `.onion` URL and (for non-public
-   shares) the private key to display in the admin UI.
-
-No extra host ports are bound. No Linux capabilities or device
-pass-through required. All outbound Tor traffic goes over the standard
-container bridge.
-
-## Data layout
-
-```
-/data/app_data/onionshare/
-  state.json                    # share metadata
-  shares/<id>/                  # uploaded files for share/website modes
-  received/<id>/                # files recipients upload to you
-  persistent_sessions/<id>.json # onionshare-cli session files
-/data/app_temp_data/onionshare/
-  run/                          # per-process scratch (HOME for onionshare-cli)
-```
+Each share can be public (URL only) or protected by a per-share private key
+the recipient must enter. A share can also be marked persistent, so the same
+`.onion` address comes back after a restart.
 
 ## Usage
 
-Open the app on your Cloud in a Bottle instance, click **New share**, pick a
-mode, upload files if applicable, then **Start**. Copy the `.onion`
-URL (and private key, if not public) to your recipient over a
-side-channel they trust — Signal, email, etc. They open it in Tor
-Browser.
+Open the app, click New share, pick a mode, upload files if the mode needs
+them, then Start. Copy the `.onion` URL (and the private key, if the share is
+not public) and send it to your recipient over a channel they trust, such as
+Signal or email. They open it in Tor Browser.
 
-Stop the share when you're done. Delete the share to remove staged
-files and any persistent session key.
+Stop a share when you are done with it, or delete it to remove its staged
+files and any saved session key. Recipients reach shares directly over Tor;
+that traffic never passes through the Cloud in a Bottle router.
 
-## Security notes
+## Caveats
 
-- The `.onion` address and private key for a live share are visible to
-  anyone with access to the admin UI. The admin UI is behind your
-  Cloud in a Bottle login.
-- Persistent shares store their Tor keys in `persistent_sessions/`.
-  Treat that directory like you'd treat any secret.
-- Receive mode accepts arbitrary uploads. Don't open received files
-  from untrusted sources without the usual precautions.
-- The admin server talks plain HTTP to localhost; Cloud in a Bottle's reverse
-  proxy provides TLS to the outside world.
+- Starting a share brings up a Tor hidden service, which can take a few
+  seconds to become reachable.
+- Receive mode accepts arbitrary uploads; treat received files as untrusted.
+- A running share's `.onion` address and private key are visible to anyone
+  who can open the admin panel, which is behind your Cloud in a Bottle login.
 
-## Licensing
+## Data
 
-OnionShare is licensed GPL-3.0. This wrapper repo is distributed under
-the same terms.
+Persistent app data holds share metadata, files staged for share and website
+modes, files uploaded to you in receive mode, and the session keys for
+persistent shares. Regenerable per-process scratch is kept in temporary,
+non-backed-up storage. Deleting a share removes its staged files and its
+persistent session key.
+
+## Resources
+
+1 GB RAM, 2 CPU cores.
+
+## License
+
+OnionShare is licensed under the GNU General Public License v3.0. Because this
+image bundles OnionShare, the image as a whole is distributed under the
+GPL-3.0 (see LICENSE). The packaging files original to this repository are
+additionally offered under the MIT License; see NOTICE.

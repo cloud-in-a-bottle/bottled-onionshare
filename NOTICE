@@ -1,0 +1,67 @@
+bottled-onionshare
+==================
+
+This repository packages OnionShare for Cloud in a Bottle / OpenHost.
+
+OnionShare
+----------
+This image installs and distributes OnionShare, a tool for anonymously
+sharing files, hosting websites, and chatting over Tor hidden services.
+
+  Upstream:   https://github.com/onionshare/onionshare
+  License:    GNU General Public License v3.0 (GPL-3.0)
+  Built from: the onionshare-cli 2.6.3 Python package, pinned in the
+              Dockerfile (pip install onionshare-cli==2.6.3), which
+              corresponds to the upstream v2.6.3 release.
+
+Corresponding Source (GPL-3.0 section 6)
+----------------------------------------
+The complete, corresponding source of the OnionShare version distributed by
+this image is the upstream repository at the v2.6.3 release tag:
+
+  https://github.com/onionshare/onionshare/tree/v2.6.3
+
+OnionShare's source is not modified by this package. The admin UI in this
+repository (server.py, shares.py, templates, static) invokes the unmodified
+onionshare-cli as a subprocess; it does not alter OnionShare itself.
+
+Third-party components
+----------------------
+The container also installs Tor and obfs4proxy from Debian to run the hidden
+services. These are distributed under their own licenses (Tor: 3-clause BSD;
+obfs4proxy: BSD-2-Clause) by their respective projects.
+
+Licensing of this repository
+----------------------------
+Because the container image built here includes OnionShare (GPL-3.0), the
+image as a whole is conveyed under the GNU General Public License v3.0 (see
+LICENSE).
+
+The files original to this repository — server.py, shares.py, the templates
+and static assets, entrypoint.sh, the Dockerfile, openhost.toml, and
+documentation (Copyright (c) 2026 the Cloud in a Bottle authors) — are
+additionally made available under the MIT License below. MIT covers only
+those packaging files, not the bundled OnionShare code, which remains under
+GPL-3.0.
+
+    MIT License
+
+    Copyright (c) 2026 the Cloud in a Bottle authors
+
+    Permission is hereby granted, free of charge, to any person obtaining a
+    copy of this software and associated documentation files (the "Software"),
+    to deal in the Software without restriction, including without limitation
+    the rights to use, copy, modify, merge, publish, distribute, sublicense,
+    and/or sell copies of the Software, and to permit persons to whom the
+    Software is furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in
+    all copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+    FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+    DEALINGS IN THE SOFTWARE.

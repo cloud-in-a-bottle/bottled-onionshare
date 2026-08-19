@@ -19,6 +19,7 @@ import http.server
 import io
 import json
 import os
+import re
 import socketserver
 import urllib.parse
 from typing import Any
@@ -46,16 +47,29 @@ def _read_template(name: str) -> str:
         return f.read()
 
 
+def _fill(template: str, values: dict[str, str]) -> str:
+    """Substitute ``{key}`` placeholders in a single regex pass.
+
+    Each placeholder is replaced exactly once and substituted values are
+    never re-scanned, so user-supplied data (share titles, filenames, log
+    output) that happens to contain literal ``{token}`` sequences is
+    inserted verbatim and can never be expanded into another
+    placeholder's content. Unknown ``{placeholders}`` are left as-is.
+    """
+    return re.sub(
+        r"\{(\w+)\}",
+        lambda m: values.get(m.group(1), m.group(0)),
+        template,
+    )
+
+
 def _render(title: str, content: str, flash: str = "") -> str:
-    # We deliberately use str.replace() rather than str.format(): log
-    # output and user-supplied filenames that end up in ``content`` may
-    # contain literal ``{`` / ``}`` characters, which str.format would
-    # attempt (and fail) to treat as placeholders.
-    return (
-        _read_template("base.html")
-        .replace("{title}", html.escape(title))
-        .replace("{flash}", flash)
-        .replace("{content}", content)
+    # Single-pass fill (see ``_fill``): ``content`` is inserted verbatim
+    # and never re-scanned, so log output and user-supplied filenames
+    # that contain literal ``{`` / ``}`` can't collide with placeholders.
+    return _fill(
+        _read_template("base.html"),
+        {"title": html.escape(title), "flash": flash, "content": content},
     )
 
 
@@ -122,12 +136,17 @@ class AdminHandler(http.server.BaseHTTPRequestHandler):
         try:
             self._do_get()
         except _BadRequest as e:
+            # The request body may not have been (fully) read; close the
+            # connection so the proxy returns our 400 rather than a 502
+            # from an unconsumed body on a kept-alive socket.
+            self.close_connection = True
             self._respond_html(400, _render("Bad request", f"<h2>{html.escape(str(e))}</h2>"))
 
     def do_POST(self) -> None:  # noqa: N802
         try:
             self._do_post()
         except _BadRequest as e:
+            self.close_connection = True
             self._respond_html(400, _render("Bad request", f"<h2>{html.escape(str(e))}</h2>"))
 
     def _do_get(self) -> None:
@@ -211,11 +230,25 @@ class AdminHandler(http.server.BaseHTTPRequestHandler):
         body = self._read_body().decode("utf-8", errors="replace")
         return urllib.parse.parse_qs(body, keep_blank_values=True)
 
+    def _send_security_headers(self) -> None:
+        # Defense-in-depth headers for the owner-only admin UI. The app
+        # is already gated by the OpenHost router, but these prevent
+        # clickjacking (framing this panel, whose forms start/stop/delete
+        # shares in one click) and MIME sniffing, and keep the .onion
+        # URLs / private keys out of the Referer header. CSP is limited to
+        # frame-ancestors so the templates' inline confirm() handlers keep
+        # working.
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Content-Security-Policy", "frame-ancestors 'none'")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+
     def _respond_html(self, code: int, body: str) -> None:
         encoded = body.encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(encoded)))
+        self._send_security_headers()
         self.end_headers()
         self.wfile.write(encoded)
 
@@ -224,12 +257,14 @@ class AdminHandler(http.server.BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(encoded)))
+        self._send_security_headers()
         self.end_headers()
         self.wfile.write(encoded)
 
     def _redirect(self, location: str) -> None:
         self.send_response(303)
         self.send_header("Location", location)
+        self._send_security_headers()
         self.end_headers()
 
     def _not_found(self) -> None:
@@ -249,7 +284,7 @@ class AdminHandler(http.server.BaseHTTPRequestHandler):
     def _dashboard(self) -> None:
         share_list = manager.list_shares()
         tpl = _read_template("dashboard.html")
-        content = tpl.replace("{share_list}", _share_list_html(share_list))
+        content = _fill(tpl, {"share_list": _share_list_html(share_list)})
         self._respond_html(200, _render("Dashboard", content))
 
     def _new_share_form(self, flash: str = "") -> None:
@@ -284,10 +319,13 @@ class AdminHandler(http.server.BaseHTTPRequestHandler):
         )
 
         if share.mode in ("share", "website"):
-            file_list = _render_file_list(share)
-            files_section = _read_template("share_files_section.html").replace(
-                "{file_list}", file_list
-            ).replace("{share_id}", html.escape(share.id))
+            files_section = _fill(
+                _read_template("share_files_section.html"),
+                {
+                    "file_list": _render_file_list(share),
+                    "share_id": html.escape(share.id),
+                },
+            )
         else:
             files_section = ""
 
@@ -311,25 +349,23 @@ class AdminHandler(http.server.BaseHTTPRequestHandler):
             else ""
         )
 
-        content = (
-            tpl.replace("{share_id}", html.escape(share.id))
-            .replace("{title}", html.escape(share.title))
-            .replace("{mode}", html.escape(_mode_label(share.mode)))
-            .replace("{status}", _status_badge(share.status))
-            .replace("{onion}", onion_html)
-            .replace("{private_key}", private_key_html)
-            .replace("{files_section}", files_section)
-            .replace("{received_section}", received_section)
-            .replace("{error}", error_html)
-            .replace("{log}", log_html)
-            .replace(
-                "{public}", "yes" if share.public else "no (private key required)"
-            )
-            .replace("{persistent}", "yes" if share.persistent else "no")
-            .replace(
-                "{start_stop_button}",
-                _start_stop_button_html(share),
-            )
+        content = _fill(
+            tpl,
+            {
+                "share_id": html.escape(share.id),
+                "title": html.escape(share.title),
+                "mode": html.escape(_mode_label(share.mode)),
+                "status": _status_badge(share.status),
+                "onion": onion_html,
+                "private_key": private_key_html,
+                "files_section": files_section,
+                "received_section": received_section,
+                "error": error_html,
+                "log": log_html,
+                "public": "yes" if share.public else "no (private key required)",
+                "persistent": "yes" if share.persistent else "no",
+                "start_stop_button": _start_stop_button_html(share),
+            },
         )
         self._respond_html(200, _render(share.title, content, flash=flash))
 
@@ -380,6 +416,7 @@ class AdminHandler(http.server.BaseHTTPRequestHandler):
         try:
             length = self._parse_content_length(self._MAX_UPLOAD_BODY)
         except _BadRequest as e:
+            self.close_connection = True
             self._respond_html(413, _render("Upload too large", f"<h2>{html.escape(str(e))}</h2>"))
             return
 
@@ -416,7 +453,7 @@ class AdminHandler(http.server.BaseHTTPRequestHandler):
                     # into memory.
                     manager.add_file_stream(share_id, item.filename, item.file)
                     added += 1
-                except (ValueError, RuntimeError, KeyError) as e:
+                except (ValueError, RuntimeError, KeyError, OSError) as e:
                     errors.append(f"{item.filename}: {e}")
 
         if errors and not added:
@@ -470,11 +507,13 @@ class AdminHandler(http.server.BaseHTTPRequestHandler):
         # Strip any attempt at traversal.
         if "/" in filename or ".." in filename or filename.startswith("."):
             self.send_response(404)
+            self._send_security_headers()
             self.end_headers()
             return
         filepath = os.path.join(STATIC_DIR, filename)
         if not os.path.isfile(filepath):
             self.send_response(404)
+            self._send_security_headers()
             self.end_headers()
             return
         ext = os.path.splitext(filename)[1]
@@ -491,12 +530,14 @@ class AdminHandler(http.server.BaseHTTPRequestHandler):
             print(f"[admin] static read failed for {filename!r}: {e}", flush=True)
             self.send_response(500)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self._send_security_headers()
             self.end_headers()
             self.wfile.write(b"500 internal server error")
             return
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
+        self._send_security_headers()
         self.end_headers()
         self.wfile.write(data)
 
