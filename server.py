@@ -243,13 +243,12 @@ class AdminHandler(http.server.BaseHTTPRequestHandler):
         # owns only its own subdomain and shouldn't assert an HTTPS policy
         # over any child names.
         #
-        # Referrer-Policy is "same-origin", NOT "no-referrer": Chromium
-        # sends "Origin: null" on POST navigations under a no-referrer
-        # policy, and the OpenHost router rejects owner-authenticated POSTs
-        # whose Origin doesn't match the app host, which broke every form
-        # submit (create/start/stop/delete). "same-origin" still withholds
-        # the Referer from cross-origin requests while sending a correct
-        # same-origin Origin so form POSTs authenticate.
+        # Referrer-Policy is "same-origin": it withholds the Referer from
+        # cross-origin requests but still sends a correct same-origin Origin
+        # header on POSTs. That Origin matters because the OpenHost router
+        # rejects an owner-authenticated POST whose Origin doesn't match the
+        # app host, and a "no-referrer" policy makes Chromium send
+        # "Origin: null" on POST navigations, which the router would reject.
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Content-Security-Policy", "frame-ancestors 'none'")
         self.send_header("X-Content-Type-Options", "nosniff")
